@@ -1,0 +1,65 @@
+trigger: none
+pr: none
+
+parameters:
+  - name: organization
+    displayName: 'Azure DevOps Organization'
+    type: string
+    default: 'devopsinsiders'
+    values:
+      - devopsinsiders
+      - VistaraTechnologies
+
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'My-New-Project'
+
+variables:
+  - group: ADO-Secrets
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  # ------------------------------------------------------------------
+  # STAGE 1: Manual approval required only for 'devopsinsiders'
+  # ------------------------------------------------------------------
+  - stage: ApproveDevopsinsiders
+    displayName: 'Manual Approval (devopsinsiders)'
+    condition: eq('${{ parameters.organization }}', 'devopsinsiders')
+    jobs:
+      - job: WaitForApproval
+        displayName: 'Awaiting Manual Approval'
+        pool: server
+        timeoutInMinutes: 1440 # 24 hours
+        steps:
+          - task: ManualValidation@0
+            inputs:
+              notifyUsers: ''
+              instructions: 'Project creation in the "devopsinsiders" organization requires manual approval. Please review the project details and approve or reject.'
+
+  # ------------------------------------------------------------------
+  # STAGE 2: Create Project (Direct for VistaraTechnologies, Post-Approval for devopsinsiders)
+  # ------------------------------------------------------------------
+  - stage: CreateProject
+    displayName: 'Create Azure DevOps Project'
+    dependsOn: ApproveDevopsinsiders
+    condition: in(dependencies.ApproveDevopsinsiders.result, 'Succeeded', 'Skipped')
+
+    jobs:
+      - job: CreateADOProject
+        displayName: 'Validate and Create Project'
+
+        steps:
+          - checkout: self
+
+          - task: PowerShell@2
+            displayName: 'Check and Create Azure DevOps Project'
+            inputs:
+              targetType: filePath
+              filePath: '$(Build.SourcesDirectory)/scripts/create-ado-project.ps1'
+              arguments: '-Organization "${{ parameters.organization }}" -ProjectName "${{ parameters.projectName }}"'
+              pwsh: true
+            env:
+              ADO_PAT: $(ADO_PAT)
