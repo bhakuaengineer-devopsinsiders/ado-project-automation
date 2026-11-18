@@ -1,19 +1,346 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
 
-trigger:
-- main
+trigger: none
+pr: none
+
+parameters:
+  - name: projectName
+    displayName: 'Azure DevOps Project Name'
+    type: string
+    default: 'My-New-Project'
+
+  - name: organization
+    displayName: 'Azure DevOps Organization'
+    type: string
+    default: 'YOUR_ORGANIZATION'
+
+variables:
+  - name: adoPat
+    value: $(ADO_PAT)
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+stages:
+  - stage: CreateProject
+    displayName: 'Create Azure DevOps Project'
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+    jobs:
+      - job: CreateADOProject
+        displayName: 'Validate and Create Project'
+
+        steps:
+          - checkout: none
+
+          - task: PowerShell@2
+            displayName: 'Check and Create Azure DevOps Project'
+            inputs:
+              targetType: inline
+              pwsh: true
+              script: |
+
+                $ErrorActionPreference = "Stop"
+
+                # ------------------------------------------------
+                # CONFIGURATION
+                # ------------------------------------------------
+
+                $Organization = "${{ parameters.organization }}"
+                $ProjectName = "${{ parameters.projectName }}"
+                $PAT = $env:ADO_PAT
+
+                $BaseUrl = "https://dev.azure.com/$Organization"
+                $ApiVersion = "7.1"
+
+                # Agile process template
+                $ProcessTemplateId = "6b724908-ef14-45cf-84f8-768b5384da45"
+
+                # Polling configuration
+                $MaxAttempts = 60
+                $PollingInterval = 30
+
+                # ------------------------------------------------
+                # LOGGING FUNCTIONS
+                # ------------------------------------------------
+
+                function Write-Info($Message) {
+                    Write-Host "##[section]INFO: $Message"
+                }
+
+                function Write-Success($Message) {
+                    Write-Host "##[section]SUCCESS: $Message"
+                }
+
+                function Write-WarningMessage($Message) {
+                    Write-Host "##[warning]WARNING: $Message"
+                }
+
+                function Write-Failure($Message) {
+                    Write-Host "##[error]ERROR: $Message"
+                }
+
+                # ------------------------------------------------
+                # VALIDATION
+                # ------------------------------------------------
+
+                Write-Host ""
+                Write-Host "=================================================="
+                Write-Host "       AZURE DEVOPS PROJECT PROVISIONING"
+                Write-Host "=================================================="
+
+                Write-Info "Starting project provisioning process."
+
+                if ([string]::IsNullOrWhiteSpace($Organization)) {
+                    throw "Azure DevOps organization name is empty."
+                }
+
+                if ([string]::IsNullOrWhiteSpace($ProjectName)) {
+                    throw "Project name is empty."
+                }
+
+                if ([string]::IsNullOrWhiteSpace($PAT)) {
+                    throw "ADO PAT is missing. Configure secret variable ADO_PAT."
+                }
+
+                Write-Info "Organization : $Organization"
+                Write-Info "Project Name : $ProjectName"
+                Write-Info "API Version  : $ApiVersion"
+
+                # ------------------------------------------------
+                # AUTHENTICATION
+                # ------------------------------------------------
+
+                Write-Info "Preparing Azure DevOps authentication."
+
+                $EncodedPAT = [Convert]::ToBase64String(
+                    [Text.Encoding]::ASCII.GetBytes(":$PAT")
+                )
+
+                $Headers = @{
+                    Authorization = "Basic $EncodedPAT"
+                    "Content-Type" = "application/json"
+                    Accept = "application/json"
+                }
+
+                Write-Success "Authentication headers prepared."
+
+                # ------------------------------------------------
+                # CHECK WHETHER PROJECT EXISTS
+                # ------------------------------------------------
+
+                Write-Host ""
+                Write-Info "Checking whether project already exists..."
+
+                $EncodedProjectName = [uri]::EscapeDataString($ProjectName)
+
+                $CheckUrl = "$BaseUrl/_apis/projects/$EncodedProjectName" +
+                            "?api-version=$ApiVersion"
+
+                $ProjectExists = $false
+
+                try {
+
+                    $ExistingProject = Invoke-RestMethod `
+                        -Uri $CheckUrl `
+                        -Method Get `
+                        -Headers $Headers
+
+                    if ($ExistingProject.name -eq $ProjectName) {
+
+                        $ProjectExists = $true
+
+                        Write-Host ""
+                        Write-WarningMessage "PROJECT ALREADY EXISTS!"
+                        Write-Host "--------------------------------------------------"
+                        Write-Host "Project Name : $($ExistingProject.name)"
+                        Write-Host "Project ID   : $($ExistingProject.id)"
+                        Write-Host "Project State: $($ExistingProject.state)"
+                        Write-Host "--------------------------------------------------"
+
+                        Write-WarningMessage "Project creation skipped. No changes were made."
+
+                        Write-Host "##vso[task.setvariable variable=ProjectCreationStatus]AlreadyExists"
+
+                        Write-Success "Pipeline completed. Project is already available."
+
+                        exit 0
+                    }
+
+                }
+                catch {
+
+                    $StatusCode = 0
+
+                    if ($_.Exception.Response) {
+                        $StatusCode = [int]$_.Exception.Response.StatusCode
+                    }
+
+                    if ($StatusCode -eq 404) {
+
+                        Write-Info "Project does not exist. Creation can proceed."
+
+                    }
+                    else {
+
+                        Write-Failure "Unable to verify project existence."
+
+                        Write-Failure "HTTP Status Code: $StatusCode"
+
+                        Write-Failure $_.Exception.Message
+
+                        throw "Project existence validation failed. Check PAT permissions and organization access."
+                    }
+                }
+
+                # ------------------------------------------------
+                # CREATE PROJECT
+                # ------------------------------------------------
+
+                Write-Host ""
+                Write-Info "Starting project creation..."
+
+                $CreateUrl = "$BaseUrl/_apis/projects?api-version=$ApiVersion"
+
+                $Body = @{
+                    name = $ProjectName
+                    description = "Project created through Azure DevOps YAML pipeline."
+                    visibility = "private"
+
+                    capabilities = @{
+                        versioncontrol = @{
+                            sourceControlType = "Git"
+                        }
+
+                        processTemplate = @{
+                            templateTypeId = $ProcessTemplateId
+                        }
+                    }
+                } | ConvertTo-Json -Depth 10
+
+                try {
+
+                    $CreateResponse = Invoke-RestMethod `
+                        -Uri $CreateUrl `
+                        -Method Post `
+                        -Headers $Headers `
+                        -Body $Body
+
+                    Write-Success "Project creation request submitted."
+
+                    Write-Host "Operation ID : $($CreateResponse.id)"
+                    Write-Host "Initial Status: $($CreateResponse.status)"
+
+                }
+                catch {
+
+                    Write-Failure "Project creation request failed."
+
+                    Write-Failure $_.Exception.Message
+
+                    throw "Azure DevOps project creation failed."
+                }
+
+                # ------------------------------------------------
+                # WAIT FOR PROJECT CREATION
+                # ------------------------------------------------
+
+                Write-Host ""
+                Write-Info "Waiting for Azure DevOps to complete project creation..."
+
+                $OperationUrl = "$BaseUrl/_apis/operations/$($CreateResponse.id)?api-version=7.1-preview.1"
+
+                $Completed = $false
+
+                for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+
+                    Write-Host ""
+                    Write-Info "Checking operation status. Attempt $Attempt of $MaxAttempts"
+
+                    try {
+
+                        $Operation = Invoke-RestMethod `
+                            -Uri $OperationUrl `
+                            -Method Get `
+                            -Headers $Headers
+
+                        $Status = $Operation.status
+
+                        Write-Host "Current Operation Status: $Status"
+
+                        switch ($Status) {
+
+                            "succeeded" {
+
+                                $Completed = $true
+
+                                Write-Success "Azure DevOps project creation completed."
+
+                                break
+                            }
+
+                            "failed" {
+
+                                Write-Failure "Azure DevOps reported project creation failure."
+
+                                Write-Host ($Operation | ConvertTo-Json -Depth 10)
+
+                                throw "Project creation operation failed."
+                            }
+
+                            "cancelled" {
+
+                                Write-Failure "Project creation operation was cancelled."
+
+                                throw "Project creation was cancelled."
+                            }
+
+                            default {
+
+                                Write-Info "Project creation is still in progress."
+
+                                Start-Sleep -Seconds $PollingInterval
+                            }
+                        }
+
+                        if ($Completed) {
+                            break
+                        }
+
+                    }
+                    catch {
+
+                        Write-Failure "Error while checking project creation status."
+
+                        Write-Failure $_.Exception.Message
+
+                        throw
+                    }
+                }
+
+                if (-not $Completed) {
+
+                    Write-Failure "Project creation timed out."
+
+                    throw "Project creation did not complete within the configured timeout."
+                }
+
+                # ------------------------------------------------
+                # FINAL RESULT
+                # ------------------------------------------------
+
+                Write-Host ""
+                Write-Host "=================================================="
+                Write-Success "AZURE DEVOPS PROJECT CREATED SUCCESSFULLY!"
+                Write-Host "=================================================="
+
+                Write-Host "Project Name : $ProjectName"
+                Write-Host "Organization : $Organization"
+                Write-Host "Project URL  : $BaseUrl/$EncodedProjectName"
+
+                Write-Host "=================================================="
+
+                Write-Host "##vso[task.setvariable variable=ProjectCreationStatus]Created"
+
+                Write-Success "Pipeline execution completed successfully."
+
+            env:
+              ADO_PAT: $(ADO_PAT)
