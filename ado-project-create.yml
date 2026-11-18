@@ -62,4 +62,7 @@ stages:
               arguments: '-Organization "${{ parameters.organization }}" -ProjectName "${{ parameters.projectName }}"'
               pwsh: true
             env:
-              ADO_PAT: $(ADO_PAT)
+              ${{ if eq(parameters.organization, 'devopsinsiders') }}:
+                ADO_PAT: $(ADO_PAT_DEVOPSINSIDERS)
+              ${{ if eq(parameters.organization, 'VistaraTechnologies') }}:
+                ADO_PAT: $(ADO_PAT_VISTARATECHNOLOGIES)
