@@ -14,8 +14,7 @@ parameters:
     default: 'YOUR_ORGANIZATION'
 
 variables:
-  - name: adoPat
-    value: $(ADO_PAT)
+  - group: ADO-Secrets
 
 pool:
   vmImage: ubuntu-latest
