@@ -186,25 +186,87 @@ $Body = @{
     }
 } | ConvertTo-Json -Depth 10
 
+$OperationUrl = $null
+$OperationId = $null
+
 try {
 
-    $CreateResponse = Invoke-RestMethod `
+    $CreateResponse = Invoke-WebRequest `
         -Uri $CreateUrl `
         -Method Post `
         -Headers $Headers `
+        -ContentType "application/json" `
         -Body $Body
 
-    Write-Success "Project creation request submitted."
+    Write-Success "Project creation request submitted (HTTP $($CreateResponse.StatusCode))."
 
-    Write-Host "Operation ID : $($CreateResponse.id)"
-    Write-Host "Initial Status: $($CreateResponse.status)"
+    # Attempt to parse response body if present
+    $ResponseBody = $null
+    if ($CreateResponse.Content) {
+        try {
+            $ResponseBody = $CreateResponse.Content | ConvertFrom-Json
+        }
+        catch {
+            Write-Info "Raw response content: $($CreateResponse.Content)"
+        }
+    }
+
+    # Extract Operation URL / ID from JSON body
+    if ($ResponseBody) {
+        if ($ResponseBody.url) {
+            $OperationUrl = $ResponseBody.url
+        }
+        if ($ResponseBody.id) {
+            $OperationId = $ResponseBody.id
+        }
+        if ($ResponseBody.status) {
+            Write-Host "Initial Status: $($ResponseBody.status)"
+        }
+    }
+
+    # Extract from HTTP Location header if body did not contain the URL
+    if ([string]::IsNullOrWhiteSpace($OperationUrl) -and $CreateResponse.Headers) {
+        $Location = $CreateResponse.Headers['Location']
+        if ($Location -is [array]) { $Location = $Location[0] }
+        if (-not [string]::IsNullOrWhiteSpace($Location)) {
+            $OperationUrl = $Location
+        }
+    }
+
+    # Extract Operation ID from Operation URL if ID is still blank
+    if ([string]::IsNullOrWhiteSpace($OperationId) -and -not [string]::IsNullOrWhiteSpace($OperationUrl)) {
+        if ($OperationUrl -match '/_apis/operations/([a-f0-9\-]+)') {
+            $OperationId = $matches[1]
+        }
+    }
+
+    # If we have an ID but no URL, construct it
+    if ([string]::IsNullOrWhiteSpace($OperationUrl) -and -not [string]::IsNullOrWhiteSpace($OperationId)) {
+        $OperationUrl = "$BaseUrl/_apis/operations/$OperationId`?api-version=7.1-preview.1"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($OperationId)) {
+        Write-Host "Operation ID  : $OperationId"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OperationUrl)) {
+        Write-Host "Operation URL : $OperationUrl"
+    }
 
 }
 catch {
 
     Write-Failure "Project creation request failed."
-
     Write-Failure $_.Exception.Message
+
+    if ($_.Exception.Response) {
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $errorDetails = $reader.ReadToEnd()
+            Write-Failure "Details: $errorDetails"
+        }
+        catch {}
+    }
 
     throw "Azure DevOps project creation failed."
 }
@@ -216,73 +278,90 @@ catch {
 Write-Host ""
 Write-Info "Waiting for Azure DevOps to complete project creation..."
 
-$OperationUrl = "$BaseUrl/_apis/operations/$($CreateResponse.id)?api-version=7.1-preview.1"
-
 $Completed = $false
 
-for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+# If we have a valid Operation URL, poll the operation endpoint
+if (-not [string]::IsNullOrWhiteSpace($OperationUrl)) {
 
-    Write-Host ""
-    Write-Info "Checking operation status. Attempt $Attempt of $MaxAttempts"
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
 
-    try {
+        Write-Host ""
+        Write-Info "Checking operation status. Attempt $Attempt of $MaxAttempts"
 
-        $Operation = Invoke-RestMethod `
-            -Uri $OperationUrl `
-            -Method Get `
-            -Headers $Headers
+        try {
 
-        $Status = $Operation.status
+            $Operation = Invoke-RestMethod `
+                -Uri $OperationUrl `
+                -Method Get `
+                -Headers $Headers
 
-        Write-Host "Current Operation Status: $Status"
+            $Status = $Operation.status
 
-        switch ($Status) {
+            Write-Host "Current Operation Status: $Status"
 
-            "succeeded" {
+            switch ($Status) {
 
-                $Completed = $true
+                "succeeded" {
+                    $Completed = $true
+                    Write-Success "Azure DevOps project creation completed."
+                    break
+                }
 
-                Write-Success "Azure DevOps project creation completed."
+                "failed" {
+                    Write-Failure "Azure DevOps reported project creation failure."
+                    Write-Host ($Operation | ConvertTo-Json -Depth 10)
+                    throw "Project creation operation failed."
+                }
 
+                "cancelled" {
+                    Write-Failure "Project creation operation was cancelled."
+                    throw "Project creation was cancelled."
+                }
+
+                default {
+                    Write-Info "Project creation is still in progress."
+                    Start-Sleep -Seconds $PollingInterval
+                }
+            }
+
+            if ($Completed) {
                 break
             }
 
-            "failed" {
-
-                Write-Failure "Azure DevOps reported project creation failure."
-
-                Write-Host ($Operation | ConvertTo-Json -Depth 10)
-
-                throw "Project creation operation failed."
-            }
-
-            "cancelled" {
-
-                Write-Failure "Project creation operation was cancelled."
-
-                throw "Project creation was cancelled."
-            }
-
-            default {
-
-                Write-Info "Project creation is still in progress."
-
-                Start-Sleep -Seconds $PollingInterval
-            }
         }
-
-        if ($Completed) {
-            break
+        catch {
+            Write-Failure "Error while checking project creation status."
+            Write-Failure $_.Exception.Message
+            throw
         }
-
     }
-    catch {
+}
+else {
+    # Fallback: Poll project existence endpoint directly if no operation reference was returned
+    Write-WarningMessage "No operation endpoint returned by Azure DevOps. Polling project directly..."
 
-        Write-Failure "Error while checking project creation status."
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
 
-        Write-Failure $_.Exception.Message
+        Write-Host ""
+        Write-Info "Checking if project exists. Attempt $Attempt of $MaxAttempts"
 
-        throw
+        try {
+            $ExistingProject = Invoke-RestMethod `
+                -Uri $CheckUrl `
+                -Method Get `
+                -Headers $Headers
+
+            if ($ExistingProject.name -eq $ProjectName) {
+                $Completed = $true
+                Write-Success "Azure DevOps project created and verified."
+                break
+            }
+        }
+        catch {
+            # 404 is expected while creation is in progress
+            Write-Info "Project is still provisioning..."
+            Start-Sleep -Seconds $PollingInterval
+        }
     }
 }
 

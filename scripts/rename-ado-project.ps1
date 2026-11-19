@@ -240,25 +240,88 @@ $Body = @{
     name = $NewProjectName
 } | ConvertTo-Json -Depth 5
 
+$OperationUrl = $null
+$OperationId = $null
+
 try {
 
-    $RenameResponse = Invoke-RestMethod `
+    $RenameResponse = Invoke-WebRequest `
         -Uri $RenameUrl `
         -Method Patch `
         -Headers $Headers `
+        -ContentType "application/json" `
         -Body $Body
 
-    Write-Success "Project rename request submitted."
+    Write-Success "Project rename request submitted (HTTP $($RenameResponse.StatusCode))."
 
-    Write-Host "Project ID   : $ProjectId"
-    Write-Host "Operation ID : $($RenameResponse.id)"
-    Write-Host "Initial Status: $($RenameResponse.status)"
+    # Attempt to parse response body if present
+    $ResponseBody = $null
+    if ($RenameResponse.Content) {
+        try {
+            $ResponseBody = $RenameResponse.Content | ConvertFrom-Json
+        }
+        catch {
+            Write-Info "Raw response content: $($RenameResponse.Content)"
+        }
+    }
+
+    # Extract Operation URL / ID from JSON body
+    if ($ResponseBody) {
+        if ($ResponseBody.url) {
+            $OperationUrl = $ResponseBody.url
+        }
+        if ($ResponseBody.id) {
+            $OperationId = $ResponseBody.id
+        }
+        if ($ResponseBody.status) {
+            Write-Host "Initial Status: $($ResponseBody.status)"
+        }
+    }
+
+    # Extract from HTTP Location header if body did not contain the URL
+    if ([string]::IsNullOrWhiteSpace($OperationUrl) -and $RenameResponse.Headers) {
+        $Location = $RenameResponse.Headers['Location']
+        if ($Location -is [array]) { $Location = $Location[0] }
+        if (-not [string]::IsNullOrWhiteSpace($Location)) {
+            $OperationUrl = $Location
+        }
+    }
+
+    # Extract Operation ID from Operation URL if ID is still blank
+    if ([string]::IsNullOrWhiteSpace($OperationId) -and -not [string]::IsNullOrWhiteSpace($OperationUrl)) {
+        if ($OperationUrl -match '/_apis/operations/([a-f0-9\-]+)') {
+            $OperationId = $matches[1]
+        }
+    }
+
+    # If we have an ID but no URL, construct it
+    if ([string]::IsNullOrWhiteSpace($OperationUrl) -and -not [string]::IsNullOrWhiteSpace($OperationId)) {
+        $OperationUrl = "$BaseUrl/_apis/operations/$OperationId`?api-version=7.1-preview.1"
+    }
+
+    Write-Host "Project ID    : $ProjectId"
+    if (-not [string]::IsNullOrWhiteSpace($OperationId)) {
+        Write-Host "Operation ID  : $OperationId"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OperationUrl)) {
+        Write-Host "Operation URL : $OperationUrl"
+    }
 
 }
 catch {
 
     Write-Failure "Project rename request failed."
     Write-Failure $_.Exception.Message
+
+    if ($_.Exception.Response) {
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $errorDetails = $reader.ReadToEnd()
+            Write-Failure "Details: $errorDetails"
+        }
+        catch {}
+    }
 
     throw "Azure DevOps project rename failed."
 }
@@ -270,79 +333,80 @@ catch {
 Write-Host ""
 Write-Info "Waiting for Azure DevOps to complete project rename..."
 
-$OperationId = $RenameResponse.id
-
-if ([string]::IsNullOrWhiteSpace($OperationId)) {
-    throw "Rename request did not return a valid operation ID."
-}
-
-$OperationUrl = "$BaseUrl/_apis/operations/$OperationId" +
-                "?api-version=7.1-preview.1"
-
 $Completed = $false
 
-for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+if (-not [string]::IsNullOrWhiteSpace($OperationUrl)) {
 
-    Write-Host ""
-    Write-Info "Checking rename status. Attempt $Attempt of $MaxAttempts"
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
 
-    try {
+        Write-Host ""
+        Write-Info "Checking rename status. Attempt $Attempt of $MaxAttempts"
 
-        $Operation = Invoke-RestMethod `
-            -Uri $OperationUrl `
-            -Method Get `
-            -Headers $Headers
+        try {
 
-        $Status = $Operation.status
+            $Operation = Invoke-RestMethod `
+                -Uri $OperationUrl `
+                -Method Get `
+                -Headers $Headers
 
-        Write-Host "Current Operation Status: $Status"
+            $Status = $Operation.status
 
-        switch ($Status) {
+            Write-Host "Current Operation Status: $Status"
 
-            "succeeded" {
+            switch ($Status) {
 
-                $Completed = $true
+                "succeeded" {
+                    $Completed = $true
+                    Write-Success "Project rename operation completed."
+                    break
+                }
 
-                Write-Success "Project rename operation completed."
+                "failed" {
+                    Write-Failure "Azure DevOps reported rename failure."
+                    Write-Host ($Operation | ConvertTo-Json -Depth 10)
+                    throw "Project rename operation failed."
+                }
 
+                "cancelled" {
+                    Write-Failure "Project rename operation was cancelled."
+                    throw "Project rename was cancelled."
+                }
+
+                default {
+                    Write-Info "Project rename is still in progress."
+                    Start-Sleep -Seconds $PollingInterval
+                }
+            }
+
+            if ($Completed) {
                 break
             }
 
-            "failed" {
-
-                Write-Failure "Azure DevOps reported rename failure."
-
-                Write-Host ($Operation | ConvertTo-Json -Depth 10)
-
-                throw "Project rename operation failed."
-            }
-
-            "cancelled" {
-
-                Write-Failure "Project rename operation was cancelled."
-
-                throw "Project rename was cancelled."
-            }
-
-            default {
-
-                Write-Info "Project rename is still in progress."
-
-                Start-Sleep -Seconds $PollingInterval
-            }
         }
+        catch {
+            Write-Failure "Error while monitoring rename operation."
+            Write-Failure $_.Exception.Message
+            throw
+        }
+    }
+}
+else {
+    # Fallback: Poll new project name directly
+    Write-WarningMessage "No operation endpoint returned by Azure DevOps. Polling project directly..."
 
-        if ($Completed) {
+    for ($Attempt = 1; $Attempt -le $MaxAttempts; $Attempt++) {
+
+        Write-Host ""
+        Write-Info "Checking if renamed project is available. Attempt $Attempt of $MaxAttempts"
+
+        $RenamedProj = Get-AdoProject -ProjectName $NewProjectName
+        if ($null -ne $RenamedProj -and $RenamedProj.id -eq $ProjectId) {
+            $Completed = $true
+            Write-Success "Project rename verified directly."
             break
         }
 
-    }
-    catch {
-
-        Write-Failure "Error while monitoring rename operation."
-        Write-Failure $_.Exception.Message
-
-        throw
+        Start-Sleep -Seconds $PollingInterval
     }
 }
 
