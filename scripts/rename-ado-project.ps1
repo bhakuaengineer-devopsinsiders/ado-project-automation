@@ -16,7 +16,7 @@ param (
     [int]$MaxAttempts = 60,
 
     [Parameter(Mandatory = $false)]
-    [int]$PollingInterval = 30
+    [int]$PollingInterval = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -280,10 +280,30 @@ try {
 
     # Extract from HTTP Location header if body did not contain the URL
     if ([string]::IsNullOrWhiteSpace($OperationUrl) -and $RenameResponse.Headers) {
-        $Location = $RenameResponse.Headers['Location']
-        if ($Location -is [array]) { $Location = $Location[0] }
-        if (-not [string]::IsNullOrWhiteSpace($Location)) {
-            $OperationUrl = $Location
+        $LocationValue = $null
+
+        # PowerShell Core (.Location on HttpResponseHeaders)
+        if ($RenameResponse.Headers.Location) {
+            $LocationValue = $RenameResponse.Headers.Location.ToString()
+        }
+        # Dictionary indexer (Windows PowerShell)
+        elseif ($RenameResponse.Headers['Location']) {
+            $LocationValue = "$($RenameResponse.Headers['Location'])"
+        }
+        # Case-insensitive header scan
+        else {
+            foreach ($k in $RenameResponse.Headers.Keys) {
+                if ($k -eq "Location" -or $k -eq "location") {
+                    $v = $RenameResponse.Headers[$k]
+                    if ($v -is [array]) { $v = $v[0] }
+                    $LocationValue = "$v"
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($LocationValue)) {
+            $OperationUrl = $LocationValue
         }
     }
 

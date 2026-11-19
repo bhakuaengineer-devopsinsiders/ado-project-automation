@@ -19,7 +19,7 @@ param (
     [int]$MaxAttempts = 60,
 
     [Parameter(Mandatory = $false)]
-    [int]$PollingInterval = 30
+    [int]$PollingInterval = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -318,10 +318,30 @@ try {
 
     # Extract from HTTP Location header if body did not contain the URL
     if ([string]::IsNullOrWhiteSpace($OperationUrl) -and $CreateResponse.Headers) {
-        $Location = $CreateResponse.Headers['Location']
-        if ($Location -is [array]) { $Location = $Location[0] }
-        if (-not [string]::IsNullOrWhiteSpace($Location)) {
-            $OperationUrl = $Location
+        $LocationValue = $null
+
+        # PowerShell Core (.Location on HttpResponseHeaders)
+        if ($CreateResponse.Headers.Location) {
+            $LocationValue = $CreateResponse.Headers.Location.ToString()
+        }
+        # Dictionary indexer (Windows PowerShell)
+        elseif ($CreateResponse.Headers['Location']) {
+            $LocationValue = "$($CreateResponse.Headers['Location'])"
+        }
+        # Case-insensitive header scan
+        else {
+            foreach ($k in $CreateResponse.Headers.Keys) {
+                if ($k -eq "Location" -or $k -eq "location") {
+                    $v = $CreateResponse.Headers[$k]
+                    if ($v -is [array]) { $v = $v[0] }
+                    $LocationValue = "$v"
+                    break
+                }
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($LocationValue)) {
+            $OperationUrl = $LocationValue
         }
     }
 
@@ -443,15 +463,22 @@ else {
                 -Method Get `
                 -Headers $Headers
 
-            if ($ExistingProject.name -eq $ProjectName) {
+            if ($ExistingProject -and $ExistingProject.name -eq $ProjectName) {
                 $Completed = $true
                 Write-Success "Azure DevOps project created and verified."
                 break
             }
+            else {
+                Write-Info "Project is not ready yet."
+            }
         }
         catch {
-            # 404 is expected while creation is in progress
-            Write-Info "Project is still provisioning..."
+            Write-Info "Project is still provisioning (waiting for project to appear)..."
+        }
+
+        # Guaranteed sleep between polling attempts
+        if (-not $Completed) {
+            Write-Info "Waiting $PollingInterval seconds before next check..."
             Start-Sleep -Seconds $PollingInterval
         }
     }
