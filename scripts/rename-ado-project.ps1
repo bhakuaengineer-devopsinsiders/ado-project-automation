@@ -79,6 +79,11 @@ if ([string]::IsNullOrWhiteSpace($PAT)) {
     throw "ADO PAT is missing. Check ADO-Secrets Variable Group."
 }
 
+# Clean any enclosing quotes passed via command line
+$Organization = $Organization.Trim('"').Trim("'").Trim()
+$ExistingProjectName = $ExistingProjectName.Trim('"').Trim("'").Trim()
+$NewProjectName = $NewProjectName.Trim('"').Trim("'").Trim()
+
 if ($ExistingProjectName -eq $NewProjectName) {
     Write-WarningMessage "Existing and new project names are identical."
     Write-WarningMessage "No rename operation is required."

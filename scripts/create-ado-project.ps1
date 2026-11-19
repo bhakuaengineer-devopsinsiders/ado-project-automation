@@ -74,6 +74,16 @@ if ([string]::IsNullOrWhiteSpace($PAT)) {
     throw "ADO PAT is missing. Configure secret variable ADO_PAT."
 }
 
+# Clean any enclosing quotes passed via command line
+$Organization = $Organization.Trim('"').Trim("'").Trim()
+$ProjectName = $ProjectName.Trim('"').Trim("'").Trim()
+if (-not [string]::IsNullOrWhiteSpace($ProcessTemplateId)) {
+    $ProcessTemplateId = $ProcessTemplateId.Trim('"').Trim("'").Trim()
+}
+if (-not [string]::IsNullOrWhiteSpace($ProcessTemplateName)) {
+    $ProcessTemplateName = $ProcessTemplateName.Trim('"').Trim("'").Trim()
+}
+
 Write-Info "Organization : $Organization"
 Write-Info "Project Name : $ProjectName"
 Write-Info "API Version  : $ApiVersion"
@@ -463,13 +473,24 @@ else {
                 -Method Get `
                 -Headers $Headers
 
-            if ($ExistingProject -and $ExistingProject.name -eq $ProjectName) {
+            $IsFound = $false
+            if ($ExistingProject) {
+                if ($ExistingProject.id -or ($ExistingProject.name -and ($ExistingProject.name.Trim() -ieq $ProjectName))) {
+                    $IsFound = $true
+                }
+            }
+
+            if ($IsFound) {
                 $Completed = $true
                 Write-Success "Azure DevOps project created and verified."
+                Write-Host "Project Name : $($ExistingProject.name)"
+                Write-Host "Project ID   : $($ExistingProject.id)"
+                Write-Host "Project State: $($ExistingProject.state)"
                 break
             }
             else {
-                Write-Info "Project is not ready yet."
+                $CurrentState = if ($ExistingProject.state) { $ExistingProject.state } else { "Provisioning in progress..." }
+                Write-Info "Project status: $CurrentState"
             }
         }
         catch {
