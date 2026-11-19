@@ -7,7 +7,10 @@ param (
     [string]$ProjectName,
 
     [Parameter(Mandatory = $false)]
-    [string]$ProcessTemplateId = "6b724908-ef14-45cf-84f8-768b5384da45",
+    [string]$ProcessTemplateId = "",
+
+    [Parameter(Mandatory = $false)]
+    [string]$ProcessTemplateName = "Agile",
 
     [Parameter(Mandatory = $false)]
     [string]$ApiVersion = "7.1",
@@ -162,11 +165,100 @@ catch {
 }
 
 # ------------------------------------------------
+# RESOLVE PROCESS TEMPLATE
+# ------------------------------------------------
+
+function Get-AdoProcessTemplateId {
+    param (
+        [string]$PreferredTemplateId,
+        [string]$PreferredTemplateName
+    )
+
+    Write-Info "Resolving process template for organization '$Organization'..."
+
+    $ProcessUrl = "$BaseUrl/_apis/process/processes?api-version=$ApiVersion"
+
+    try {
+        $ProcessResponse = Invoke-RestMethod `
+            -Uri $ProcessUrl `
+            -Method Get `
+            -Headers $Headers
+
+        # Response can be an array directly or an object with 'value' property
+        $Processes = $null
+        if ($ProcessResponse -is [array]) {
+            $Processes = $ProcessResponse
+        }
+        elseif ($ProcessResponse.value) {
+            $Processes = $ProcessResponse.value
+        }
+
+        if ($Processes -and $Processes.Count -gt 0) {
+            # 1. If explicit ID provided and exists in org, use it
+            if (-not [string]::IsNullOrWhiteSpace($PreferredTemplateId)) {
+                $MatchedById = $Processes | Where-Object { $_.id -eq $PreferredTemplateId -or $_.typeId -eq $PreferredTemplateId } | Select-Object -First 1
+                if ($MatchedById) {
+                    $SelectedId = if ($MatchedById.id) { $MatchedById.id } else { $MatchedById.typeId }
+                    Write-Success "Using specified process template: $($MatchedById.name) ($SelectedId)"
+                    return $SelectedId
+                }
+                Write-WarningMessage "Specified ProcessTemplateId '$PreferredTemplateId' was not found in '$Organization'."
+            }
+
+            # 2. If name specified (e.g. 'Agile', 'Scrum', 'Basic'), find matching template
+            if (-not [string]::IsNullOrWhiteSpace($PreferredTemplateName)) {
+                $MatchedByName = $Processes | Where-Object { $_.name -like "*$PreferredTemplateName*" } | Select-Object -First 1
+                if ($MatchedByName) {
+                    $SelectedId = if ($MatchedByName.id) { $MatchedByName.id } else { $MatchedByName.typeId }
+                    Write-Success "Resolved process template by name '$PreferredTemplateName': $($MatchedByName.name) ($SelectedId)"
+                    return $SelectedId
+                }
+            }
+
+            # 3. Try to find 'Agile' by default
+            $AgileProcess = $Processes | Where-Object { $_.name -eq "Agile" } | Select-Object -First 1
+            if ($AgileProcess) {
+                $SelectedId = if ($AgileProcess.id) { $AgileProcess.id } else { $AgileProcess.typeId }
+                Write-Success "Found standard 'Agile' template: $($AgileProcess.name) ($SelectedId)"
+                return $SelectedId
+            }
+
+            # 4. Fall back to organization's default template (isDefault = true)
+            $DefaultProcess = $Processes | Where-Object { $_.isDefault -eq $true } | Select-Object -First 1
+            if ($DefaultProcess) {
+                $SelectedId = if ($DefaultProcess.id) { $DefaultProcess.id } else { $DefaultProcess.typeId }
+                Write-Success "Using organization's default process template: $($DefaultProcess.name) ($SelectedId)"
+                return $SelectedId
+            }
+
+            # 5. Take first available template
+            $FirstProcess = $Processes | Select-Object -First 1
+            $SelectedId = if ($FirstProcess.id) { $FirstProcess.id } else { $FirstProcess.typeId }
+            Write-Success "Using first available process template: $($FirstProcess.name) ($SelectedId)"
+            return $SelectedId
+        }
+    }
+    catch {
+        Write-WarningMessage "Could not query organization processes ($($_.Exception.Message)). Falling back to default ID."
+    }
+
+    # Final fallback if API call fails
+    if (-not [string]::IsNullOrWhiteSpace($PreferredTemplateId)) {
+        return $PreferredTemplateId
+    }
+    return "6b724908-ef14-45cf-84f8-768b5384da45" # Agile GUID
+}
+
+# ------------------------------------------------
 # CREATE PROJECT
 # ------------------------------------------------
 
 Write-Host ""
 Write-Info "Starting project creation..."
+
+$ResolvedProcessTemplateId = Get-AdoProcessTemplateId `
+    -PreferredTemplateId $ProcessTemplateId `
+    -PreferredTemplateName $ProcessTemplateName
 
 $CreateUrl = "$BaseUrl/_apis/projects?api-version=$ApiVersion"
 
@@ -181,7 +273,7 @@ $Body = @{
         }
 
         processTemplate = @{
-            templateTypeId = $ProcessTemplateId
+            templateTypeId = $ResolvedProcessTemplateId
         }
     }
 } | ConvertTo-Json -Depth 10
