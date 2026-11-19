@@ -118,7 +118,7 @@ Write-Success "Authentication headers prepared."
 Write-Host ""
 Write-Info "Verifying PAT token access for organization '$Organization'..."
 
-$ConnectionUrl = "$BaseUrl/_apis/connectionData?api-version=$ApiVersion"
+$ConnectionUrl = "$BaseUrl/_apis/projects?`$top=1&api-version=$ApiVersion"
 
 try {
     $ConnResponse = Invoke-WebRequest `
@@ -133,12 +133,18 @@ try {
         throw "Authentication rejected for organization '$Organization'. Check that the PAT is created in this org with 'Project: Read, write & manage' scope."
     }
 
-    $ConnData = $ConnResponse.Content | ConvertFrom-Json
-    $UserName = if ($ConnData.authenticatedUser.providerDisplayName) { $ConnData.authenticatedUser.providerDisplayName } else { $ConnData.authenticatedUser.customDisplayName }
-    Write-Success "Authentication verified! Authenticated as: $UserName"
+    Write-Success "Authentication verified! PAT has access to organization '$Organization'."
 }
 catch {
     Write-Failure "Authentication check failed: $($_.Exception.Message)"
+    if ($_.Exception.Response) {
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            Write-Failure "Response Details: $($reader.ReadToEnd())"
+        }
+        catch {}
+    }
     throw "Azure DevOps rejected the PAT token for organization '$Organization'. Check your secret variable in ADO-Secrets."
 }
 
