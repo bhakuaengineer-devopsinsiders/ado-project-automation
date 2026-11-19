@@ -5,10 +5,10 @@ parameters:
   - name: organization
     displayName: 'Azure DevOps Organization'
     type: string
-    default: 'devopsinsiders'
+    default: 'costcocloudops1'
     values:
-      - devopsinsiders
-      - VistaraTechnologies
+      - costcocloudops1
+      - CostcoWholesale11
 
   - name: existingProjectName
     displayName: 'Existing Project Name'
@@ -28,11 +28,11 @@ pool:
 
 stages:
   # ------------------------------------------------------------------
-  # STAGE 1: Manual approval required only for 'devopsinsiders'
+  # STAGE 1: Manual approval required only for 'CostcoWholesale11'
   # ------------------------------------------------------------------
-  - stage: ApproveDevopsinsiders
-    displayName: 'Manual Approval (devopsinsiders)'
-    condition: eq('${{ parameters.organization }}', 'devopsinsiders')
+  - stage: ApproveCostcoWholesale
+    displayName: 'Manual Approval (CostcoWholesale11)'
+    condition: eq('${{ parameters.organization }}', 'CostcoWholesale11')
     jobs:
       - job: WaitForApproval
         displayName: 'Awaiting Manual Approval'
@@ -42,15 +42,15 @@ stages:
           - task: ManualValidation@0
             inputs:
               notifyUsers: ''
-              instructions: 'Project rename in the "devopsinsiders" organization requires manual approval. Please review the details and approve or reject.'
+              instructions: 'Project rename in the "CostcoWholesale11" organization requires manual approval. Please review the details and approve or reject.'
 
   # ------------------------------------------------------------------
-  # STAGE 2: Rename Project (Direct for VistaraTechnologies, Post-Approval for devopsinsiders)
+  # STAGE 2: Rename Project (Direct for costcocloudops1, Post-Approval for CostcoWholesale11)
   # ------------------------------------------------------------------
   - stage: RenameProject
     displayName: 'Rename Azure DevOps Project'
-    dependsOn: ApproveDevopsinsiders
-    condition: in(dependencies.ApproveDevopsinsiders.result, 'Succeeded', 'Skipped')
+    dependsOn: ApproveCostcoWholesale
+    condition: in(dependencies.ApproveCostcoWholesale.result, 'Succeeded', 'Skipped')
 
     jobs:
       - job: RenameADOProject
@@ -67,7 +67,8 @@ stages:
               arguments: '-Organization "${{ parameters.organization }}" -ExistingProjectName "${{ parameters.existingProjectName }}" -NewProjectName "${{ parameters.newProjectName }}"'
               pwsh: true
             env:
-              ${{ if eq(parameters.organization, 'devopsinsiders') }}:
-                ADO_PAT: $(ADO_PAT_DEVOPSINSIDERS)
-              ${{ if eq(parameters.organization, 'VistaraTechnologies') }}:
-                ADO_PAT: $(ADO_PAT_VISTARATECHNOLOGIES)
+              ${{ if eq(parameters.organization, 'costcocloudops1') }}:
+                ADO_PAT: $(ADO_PAT_COSTCOCLOUDOPS1)
+              ${{ if eq(parameters.organization, 'CostcoWholesale11') }}:
+                ADO_PAT: $(ADO_PAT_COSTCOWHOLESALE11)
+              ADO_PAT_FALLBACK: $(ADO_PAT)

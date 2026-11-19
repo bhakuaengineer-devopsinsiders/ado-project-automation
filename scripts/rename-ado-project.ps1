@@ -26,6 +26,11 @@ $ErrorActionPreference = "Stop"
 # ------------------------------------------------
 
 $PAT = $env:ADO_PAT
+if ([string]::IsNullOrWhiteSpace($PAT) -or $PAT -like "`$(*") {
+    if (-not [string]::IsNullOrWhiteSpace($env:ADO_PAT_FALLBACK) -and -not ($env:ADO_PAT_FALLBACK -like "`$(*")) {
+        $PAT = $env:ADO_PAT_FALLBACK
+    }
+}
 $BaseUrl = "https://dev.azure.com/$Organization"
 
 # ------------------------------------------------
