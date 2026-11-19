@@ -122,6 +122,37 @@ $Headers = @{
 Write-Success "Authentication headers prepared."
 
 # ------------------------------------------------
+# VERIFY PAT AUTHENTICATION
+# ------------------------------------------------
+
+Write-Host ""
+Write-Info "Verifying PAT token access for organization '$Organization'..."
+
+$ConnectionUrl = "$BaseUrl/_apis/connectionData?api-version=$ApiVersion"
+
+try {
+    $ConnResponse = Invoke-WebRequest `
+        -Uri $ConnectionUrl `
+        -Method Get `
+        -Headers $Headers `
+        -UseBasicParsing
+
+    if ($ConnResponse.Content -match "<html|SPS\.Authentication|signin") {
+        Write-Failure "AUTHENTICATION FAILED: Azure DevOps returned an HTML sign-in page instead of JSON."
+        Write-Failure "The Personal Access Token (PAT) is invalid, expired, or not authorized for '$Organization'."
+        throw "Authentication rejected for organization '$Organization'. Check that the PAT is created in this org with 'Project: Read, write & manage' scope."
+    }
+
+    $ConnData = $ConnResponse.Content | ConvertFrom-Json
+    $UserName = if ($ConnData.authenticatedUser.providerDisplayName) { $ConnData.authenticatedUser.providerDisplayName } else { $ConnData.authenticatedUser.customDisplayName }
+    Write-Success "Authentication verified! Authenticated as: $UserName"
+}
+catch {
+    Write-Failure "Authentication check failed: $($_.Exception.Message)"
+    throw "Azure DevOps rejected the PAT token for organization '$Organization'. Check your secret variable in ADO-Secrets."
+}
+
+# ------------------------------------------------
 # FUNCTION: GET PROJECT
 # ------------------------------------------------
 
